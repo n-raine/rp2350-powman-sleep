@@ -183,11 +183,14 @@ reality.
 While we want to avoid the standard initialisation sequence to keep our RAM
 intact, we still need to run *some* initialisation functions like properly
 resetting the peripherals so we can set them up again properly.
-fortunately, in the pico SDK crt0.S[^6] it writes RAM and then calls a function
-`runtime_init()` provided by the pico SDK.
-Once that's one, it calls `main()` and `exit()` like a typical desktop program
-(except `exit()` shouldn't return on an embedded system).
+The pico-SDK mentions that the `runtime_init()` function[^7] is useful for
+exactly our purposes.
 
+To complicate things, there are two cores on the RP2350 chip, both of which
+boot into our reset vector in RAM.
+This means that the reset vector also needs to park core1 so that we don't
+double-initialise things which usually ends up with either hangs or putting
+at least one core into an unknown state.
 
 ## Credits and Resources
 
@@ -199,6 +202,7 @@ which helped me start investigating "properly" the powman.
 [^5]: RP2350 datasheet, section 6.4:
 [^3]: Kevin Boone's explanation of running code in RAM: <https://kevinboone.me/pico_run_ram.html>
 [^4]: `boot_stage2` in Pico-SDK GitHub: <>
+[^7]: pico SDK `runtime_init()` <https://www.raspberrypi.com/documentation/pico-sdk/runtime.html#group_pico_runtime_1gad27ee86dcd85855022a424f61b839d04>
 
 ## License
 
