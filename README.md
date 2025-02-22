@@ -192,6 +192,16 @@ This means that the reset vector also needs to park core1 so that we don't
 double-initialise things which usually ends up with either hangs or putting
 at least one core into an unknown state.
 
+## What's next?
+
+This code doesn't actually do exactly what I've written above... sorry, I lied.
+It doesn't jump back to where we left off, that requires some very precise
+stack bookkeeping which I haven't the experience to get right in a robust way.
+So for now, it assumes that you're running a superloop within a function and it
+just calls that instead.
+Though I do believe it is possible to carefully adjust the stack to jump back
+to the exact location where you left off.
+
 ## Credits and Resources
 
 Credits to peterharperuk for publishing a nice [powman example](https://github.com/peterharperuk/pico-examples/commit/7dccd00d15ded4ddf961f44fdcd1f11a9d8c8be1)

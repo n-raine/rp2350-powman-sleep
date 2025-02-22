@@ -2,6 +2,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include <stdio.h>
+
 #include "hardware/flash.h"
 #include "hardware/powman.h"
 #include "hardware/regs/addressmap.h"
@@ -26,6 +28,8 @@ static uint32_t led_on_time = 500;
 
 volatile bool debug_catch = true;
 
+void main_loop();
+
 /**
  *  If something goes wrong, blink rapidly with this pattern.
  */
@@ -43,6 +47,9 @@ void error_blink() { while(1) {
  *  initialised after every sleep reboot.
  */
 void init_peripherals() {
+
+    stdio_init_all();
+
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
 }
@@ -54,38 +61,14 @@ void init_peripherals() {
  */
 void __not_in_flash_func(exit_sleep)() {
 
-    // Check what core we are. We only want core0 running.
-    //volatile int *proc_num = (volatile int*)(SIO_BASE + SIO_CPUID_OFFSET);
-    //while(*proc_num) {}
-
-    // Now that we know we're core0, we stop core1
-    //multicore_reset_core1();
-    
-    //while(debug_catch);
-    //debug_catch = 1;
-
-    //__breakpoint();
-
-    // Fudge the stack pointer
-    //asm (
-    //    "add sp, #4"
-    //);
 
     // Set flash to run in XIP mode because we skipped the booloader
-    //rom_flash_exit_xip();
-    //rom_bootrom_state_reset(BOOTROM_STATE_RESET_CURRENT_CORE);
+    // Run with read command 0xEB in quad mode with clkdiv=3
     rom_connect_internal_flash();
     rom_flash_flush_cache();
-    //rom_flash_enter_cmd_xip();
     rom_flash_select_xip_read_mode(BOOTROM_XIP_MODE_EBH_QUAD, 3);
-    //flash_enable_xip_via_boot2();
-    //_stage2_boot();
 
-    //__breakpoint();
-
-    //while(debug_catch);
-    //debug_catch = 1;
-
+    // Clear global mutexes that may not have been released before sleeping
     extern int __mutex_array_start;
     extern int __mutex_array_end;
     for(int *p = &__mutex_array_start; p < &__mutex_array_end; p++) {
@@ -94,26 +77,12 @@ void __not_in_flash_func(exit_sleep)() {
 
     // Initialise the C library for core0 without destroying our RAM
     runtime_init();
-    //runtime_run_per_core_initializers();
 
-    //while(debug_catch);
-    //debug_catch = 1;
-    //__breakpoint();
-
-    //stdio_init_all();
-    //printf("awake");
-    //stdio_flush();
-
+    // Re-initialise peripherals etc.
     init_peripherals();
+    printf("awake\n");
 
-    // Test to see if re-initialise was successful
-    //while(1) {
-    //gpio_put(PICO_DEFAULT_LED_PIN, 0);
-    //sleep_ms(150);
-    //gpio_put(PICO_DEFAULT_LED_PIN, 1);
-    //sleep_ms(150);
-    //}
-
+    // Jump back to app loop
     main_loop();
 
 }
@@ -144,37 +113,30 @@ void do_sleep() {
     uintptr_t stack_pointer;
 
     // We need assembly to get the stack pointer
+    /*
     asm (
         "mov %0, sp"
         : "=r" (stack_pointer)
     );
     stack_pointer += sizeof(uintptr_t);
+    */
 
+    // Reset the stack pointer on wake
     extern char __StackTop;
     stack_pointer = (uintptr_t)&__StackTop;
 
-    //printf("boot_addr: %p\n", boot_addr);
-    //printf("stack_pointer: %p\n", stack_pointer);
-    //extern uintptr_t __preinit_array_start; 
-    //printf("__preinit_array_start: 0x%p\n", &__preinit_array_start);
-    //stdio_flush();
-
     powman_hw->boot[0] = POWMAN_BOOT_MAGIC_NUM; // magic_number
-    //powman_hw->boot[0] = 0;
     powman_hw->boot[1] = POWMAN_BOOT_MAGIC_NEG ^ boot_addr; // (-magic_number) ^ boot_addr
     powman_hw->boot[2] = stack_pointer; // stack pointer
-    //powman_hw->boot[2] = 0x20081000; // Top of ram
     powman_hw->boot[3] = boot_addr; // boot_addr
 
     powman_power_state p0_0 = 0x0f; // SW core, XIP cache, SRAM 0, SRAM 1
-    powman_power_state p1_0 = 0x03; // XIP cache, SRAM 0, SRAM 1
-    //powman_power_state p0_0 = 0x0c; // SW core, XIP cache, SRAM 0, SRAM 1
-    //powman_power_state p1_0 = 0x00; // nothing
+    powman_power_state p1_0 = 0x03; // SRAM 0, SRAM 1
 
     bool valid = powman_configure_wakeup_state(p1_0, p0_0);
-    if(!valid) error_blink(); // 
+    if(!valid) error_blink();
 
-    gpio_deinit(PICO_DEFAULT_LED_PIN);
+    printf("sleeping... ");
 
     powman_set_power_state(p1_0);
     __wfi();
@@ -202,6 +164,7 @@ void do_work() {
     sleep_ms(led_on_time);
     gpio_put(PICO_DEFAULT_LED_PIN, 0);
 
+    // Swap the on/off times to show that state is retained
     int tmp = led_on_time;
     led_on_time = led_off_time;
     led_off_time = tmp;
@@ -223,8 +186,6 @@ void main_loop() {
 
 int main() {
     // Enter here from normal reboot when powman reset vector is empty.
-
-    stdio_init_all();
 
     init_peripherals();
 
