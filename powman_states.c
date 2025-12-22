@@ -18,6 +18,8 @@
 #define POWMAN_BOOT_MAGIC_NUM 0xb007c0d3
 #define POWMAN_BOOT_MAGIC_NEG 0x4ff83f2d
 
+#define INVERTED false
+
 // Global state to make sure 
 static uint64_t next_wakeup = 0;
 static uint64_t const WAKEUP_INTERVAL = 5000;
@@ -156,13 +158,13 @@ void do_sleep() {
  * Blink the LED in different patterns to show that it works.
  */
 void do_work() {
-    gpio_put(PICO_DEFAULT_LED_PIN, 1);
+    gpio_put(PICO_DEFAULT_LED_PIN, INVERTED ? 0 : 1);
     sleep_ms(led_on_time);
-    gpio_put(PICO_DEFAULT_LED_PIN, 0);
+    gpio_put(PICO_DEFAULT_LED_PIN, INVERTED ? 1 : 0);
     sleep_ms(led_off_time);
-    gpio_put(PICO_DEFAULT_LED_PIN, 1);
+    gpio_put(PICO_DEFAULT_LED_PIN, INVERTED ? 0 : 1);
     sleep_ms(led_on_time);
-    gpio_put(PICO_DEFAULT_LED_PIN, 0);
+    gpio_put(PICO_DEFAULT_LED_PIN, INVERTED ? 1 : 0);
 
     // Swap the on/off times to show that state is retained
     int tmp = led_on_time;
