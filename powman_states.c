@@ -3,39 +3,32 @@
 #include <stdbool.h>
 
 #include <stdio.h>
+#include <pico/stdlib.h>
 
 #include "hardware/flash.h"
+#include "hardware/gpio.h"
 #include "hardware/powman.h"
-#include "hardware/regs/addressmap.h"
-#include "hardware/regs/sio.h"
 #include "pico/bootrom.h"
-#include "pico/multicore.h"
 #include "pico/platform/sections.h" // for `__not_in_flash_func()`
 #include "pico/runtime_init.h"
-#include "pico/stdlib.h"
-#include "pico/sync.h" // for `__wfi()`
                        
-#define POWMAN_BOOT_MAGIC_NUM 0xb007c0d3
-#define POWMAN_BOOT_MAGIC_NEG 0x4ff83f2d
-
+// Keep the LED on during sleep?
 #define INVERTED false
 
-// Global state to make sure 
+// Global state
 static uint64_t next_wakeup = 0;
 static uint64_t const WAKEUP_INTERVAL = 5000;
 
 // Example global state which needs to be preserved on reboot 
 static uint32_t led_off_time = 250;
-static uint32_t led_on_time = 500;
+static uint32_t led_on_time = 750;
 
-volatile bool debug_catch = true;
-
-void main_loop();
 
 /**
  *  If something goes wrong, blink rapidly with this pattern.
  */
-void error_blink() { while(1) {
+void error_blink() {
+    while(1) {
         gpio_put(PICO_DEFAULT_LED_PIN, 0);
         sleep_ms(150);
         gpio_put(PICO_DEFAULT_LED_PIN, 1);
@@ -58,19 +51,57 @@ void init_peripherals() {
 
 
 /**
- *  This code should be run from RAM with a stack pointer set by `do_sleep()`
- *  When this function returns, it goes back to `main()`
+ * Tell the POWMAN timer when to next wake us up
+ * This also relies on global state, which we would like to retain
  */
-void __not_in_flash_func(exit_sleep)() {
+void set_next_timer() {
+    // Set powman timer alarm
+    next_wakeup += WAKEUP_INTERVAL;
+    powman_enable_alarm_wakeup_at_ms(next_wakeup);
+}
 
 
-    // Set flash to run in XIP mode because we skipped the booloader
-    // Run with read command 0xEB in quad mode with clkdiv=3
+/**
+ * Sets up the POWMAN peripheral to go to P1.4 mode (cores and XIP cache off,
+ * RAM on).
+ * We need the RAM to stay on since that's where our stack and resume functions
+ * live.
+ *
+ * Call this function like any other, except the processor sleeps during it.
+ */
+void __not_in_flash_func(do_sleep)() {
+
+    printf("sleeping... ");
+    set_next_timer();
+
+    // Tell the POWMAN peripheral what power state we want to go into
+    // We turn processor off and keep both RAM banks active
+    // Stack is in SRAM1, RAM code is by default in SRAM0, so we need both banks
+    powman_power_state p0_0 = 0x0f; // SW core, XIP cache, SRAM 0, SRAM 1
+    powman_power_state p1_4 = 0x03; // SRAM 0, SRAM 1
+    bool valid = powman_configure_wakeup_state(p1_4, p0_0);
+    if(!valid) error_blink();
+    powman_set_power_state(p1_4);
+
+    // Call the function which prepares the reset vector, then
+    // turns it off.
+    // When processor reboots, it resumes execution from halfway through the
+    // `really_do_sleep()` function, which returns like normal
+    extern void really_do_sleep();
+    really_do_sleep();
+
+    // QSPI peripheral got turned off, so we turn it back on
+    // Otherwise, we can't read our program code from flash.
+    // These functions are just wrappers that call the bootrom functions to do
+    // the heavy lifting
     rom_connect_internal_flash();
     rom_flash_flush_cache();
+    // Run with read command 0xEB in quad mode with clkdiv=3
     rom_flash_select_xip_read_mode(BOOTROM_XIP_MODE_EBH_QUAD, 3);
 
     // Clear global mutexes that may not have been released before sleeping
+    // WARN: I have no idea what consequences this may have, but C runtime
+    // doesn't re-initialise if we leave it alone
     extern int __mutex_array_start;
     extern int __mutex_array_end;
     for(int *p = &__mutex_array_start; p < &__mutex_array_end; p++) {
@@ -80,76 +111,9 @@ void __not_in_flash_func(exit_sleep)() {
     // Initialise the C library for core0 without destroying our RAM
     runtime_init();
 
-    // Re-initialise peripherals etc.
+    // Re-initialise peripherals, because we did just reboot the processor.
     init_peripherals();
     printf("awake\n");
-
-    // Jump back to app loop
-    main_loop();
-
-}
-
-
-/**
- *  We need a separate function to do this to not mess up the stack frame
- */
-void set_next_timer() {
-    // Set powman timer alarm
-    next_wakeup += WAKEUP_INTERVAL;
-    powman_enable_alarm_wakeup_at_ms(next_wakeup);
-
-}
-
-
-/**
- *  Prepares the system for sleep by setting the powman alarm to self-wakeup.
- *  Also loads the `exit_sleep()` function into RAM to enable rebooting into
- *  it after wakeup.
- */
-void do_sleep() {
-
-    set_next_timer();
-
-    // Set the new `exit_sleep()` RAM function as reboot vector
-    uintptr_t boot_addr = (uintptr_t)exit_sleep | 1; // OR with 1 ensures we are running ARM thumb instructions rather than RISC-V
-    uintptr_t stack_pointer;
-
-    // We need assembly to get the stack pointer
-    /*
-    asm (
-        "mov %0, sp"
-        : "=r" (stack_pointer)
-    );
-    stack_pointer += sizeof(uintptr_t);
-    */
-
-    // Reset the stack pointer on wake
-    extern char __StackTop;
-    stack_pointer = (uintptr_t)&__StackTop;
-
-    powman_hw->boot[0] = POWMAN_BOOT_MAGIC_NUM; // magic_number
-    powman_hw->boot[1] = POWMAN_BOOT_MAGIC_NEG ^ boot_addr; // (-magic_number) ^ boot_addr
-    powman_hw->boot[2] = stack_pointer; // stack pointer
-    powman_hw->boot[3] = boot_addr; // boot_addr
-
-    powman_power_state p0_0 = 0x0f; // SW core, XIP cache, SRAM 0, SRAM 1
-    powman_power_state p1_0 = 0x03; // SRAM 0, SRAM 1
-
-    bool valid = powman_configure_wakeup_state(p1_0, p0_0);
-    if(!valid) error_blink();
-
-    printf("sleeping... ");
-
-    powman_set_power_state(p1_0);
-    __wfi();
-    // Goes to sleep here and returns to original caller
-
-    // Reboots into bootloader which runs the code from the boot vector above.
-    // When that function returns, it goes back to the place this function was called.
-
-    while(1) {
-        error_blink();
-    }
 }
 
 
@@ -172,26 +136,29 @@ void do_work() {
     led_off_time = tmp;
 }
 
-void main_loop() {
-    /*
-     * Infinite loop to do work and sleep
-     */
-    while(1) {
 
-        // useful work
-        do_work();
-
-        // Go to sleep for some time
-        do_sleep();
+/**
+ * Three quick blinks to show that this once-only routine really does only
+ * get run on the first boot.
+ */
+void blink_on_main() {
+    for(int i = 0; i < 3; i++) {
+        gpio_put(PICO_DEFAULT_LED_PIN, INVERTED ? 0 : 1);
+        sleep_ms(150);
+        gpio_put(PICO_DEFAULT_LED_PIN, INVERTED ? 1 : 0);
+        sleep_ms(150);
     }
+    sleep_ms(500);
 }
+
 
 int main() {
     // Enter here from normal reboot when powman reset vector is empty.
 
+    // Set up the peripherals that we're going to use
     init_peripherals();
 
-    // Set and start the powman timer once
+    // Set and start the powman timer
     powman_timer_set_1khz_tick_source_lposc();
     powman_timer_set_ms(0x123456);
     next_wakeup = 0x123456;
@@ -200,7 +167,19 @@ int main() {
     // Allow power down when debugger connected
     powman_set_debug_power_request_ignored(true);
 
-    main_loop();
+    // Do a blink pattern that only appears on the first boot
+    // This represents some kind of once-only initialisation or setting up
+    // RAM that we don't want to do, or can't do, every time we wake up
+    blink_on_main();
+
+    // Infinite loop of work and sleep
+    while(1) {
+        // useful work
+        do_work();
+
+        // Go to sleep until POWMAN alarm wakes us up
+        do_sleep();
+    }
 
 }
 

@@ -3,91 +3,86 @@
 ## Description
 
 An example of using the new powman states available in the RP2350 to go to a
-lower power sleep (<500 uA) compared to the SLEEP and DORMANT states of the
+lower power sleep (<500 uA) compared to the `SLEEP` and `DORMANT` states of the
 RP2040.
 
-This uses the powman BOOT registers to make the bootloader reboot to some other
-address and uses the stack to jump back to the callee-address to resume work
-like normal.
+This uses the powman BOOT registers to save the current execution state before
+powering down the core. On power-up, it resumes execution as normal.
 
 Without using the powman BOOT registers, changing to a lower power state will
 reboot the core and run from the start of `main()` again, which isn't useful
 for most applications that want sleep.
 
-It leaves the SRAM domains on to retain any global state and stack contents.
+It crucially leaves the SRAM domains on to retain any global state and stack
+contents.
 
 Example is built for Arm but can be adapted to run on RISC-V cores.
 
 ## Explanation
 
 I'd like to preface this information with the fact that I'm not a microcontroller
-expert, nor have I used the RP2350 an awful lot (I mean, you can't even buy the
-chip by itself at the time of writing) but I have dug into a reset sequence or
-two in my time with computers.
+expert, nor have I used the RP2350 an awful lot but I have dug into a reset
+sequence or two.
 
 To understand why powman sleep is done the way it is, we need to first look at
 the power states provided by the RP2350's predecessor, the RP2040.
 These states were called `SLEEP` and `DORMANT` and worked by stopping the clocks
 that ran the cores while retaining the processor state like registers etc.
 These states are still present on the RP2350 as well.
-They reduced power by a lot, but there were still areas of the processor 
-which were powered on that didn't need to be and resulted in a rather high sleep
-current of 1-2 mA.
+They reduced power by a lot, but the processor was still powered on, so the
+idle power draw/leakage current still drew 1-2 mA.
 Not so great when other microcontrollers (like some STM32 series) can go to
 sub-100 uA range in sleep modes.
 
 So how does Raspberry Pi fix this problem? Well its simple: If you aren't using
 the processor, then lets just turn it all off!
-Well, technically it turns off the switched core and peripherals and retains a
-small section of always-on (AON) peripherals, which contains the powman peripheral.
-You can optionally power-down the RAM but if you want to retain information between
-reboots, you probably won't want to do that...
+Well, technically it turns off the switched core and peripherals, and retains a
+small section of always-on (AON) circuitry, which contains the powman peripheral.
+You can optionally power-down the RAM, but if you want to retain information
+during sleep, you probably won't want to do that, or risk wearing out your flash
+by constantly writing your program's state to it before sleeping.
 
 Turning off the core results in a drastic power drop of around 10x, down as low
 as 150 uA!
 This is excellent! There's only one problem: We've just turned the processor off,
 so when it powers on again, it won't have any "memory" of what it was doing.
-Not knowing any different, it goes through the whole reset sequence and starts
-from the beginning (bootloader and into `main()`) again.
-To make things worse, the bootloader zeroes all of memory as part of its
-power-on sequence and resets all global variables to their initial values.
+
+That's ok. We can just keep a flag in RAM and add checks in `main()` to see
+what state we were in, right? Well, unfortunately, no.
+The bootloader zeroes all of memory as part of its power-on sequence and resets
+all global variables to their initial values.
 So even though we kept the RAM on during sleep, using up all that power, we don't
 get to reap the benefits of keeping it around!
 This isn't exactly ideal if you wanted to sleep for 30 seconds before checking
-a sensor again and comparing it to its last reading which you carefully tucked
+a sensor again and comparing it to the last reading you carefully tucked
 away in memory.
 
-This means you need to have some way of differentiating between power-on resets
-(first powering the pico on) and wakeups from the power manager.
-If not, you'll end up going through your sensor initialisation sequence and
-reset whatever it was doing in the process.
-
 Fortunately, Raspberry Pi foresaw this problem and gave us a few special registers
-which are retained when we go to sleep.
+which are retained when we go to sleep and, importantly, are checked _before_ 
+the bootloader starts clearing RAM.
 These are the `BOOT[0..3]` registers in the powman peripheral, which is always
 kept on, even in the lowest sleep states.
 
 These `BOOT` registers are special in that you can store a return address and
 stack pointer in them so that when the processor turns back on, the bootloader 
 can check them and, if present and correct, jump to the code which it points to.
-This re-entry code can then re-initialise the peripherals *without* going through
-your sensor reset sequence, because we know that if it runs, its because
-we woke up from sleep so can assume that the sensor is already up and running.
-This skips the whole "RAM re-initialise" bit and retains your global variables
-as well!
+This skips the whole "RAM re-initialise" bit and retains your global variables.
 
-The catch is that the code to jump to needs to be loaded into RAM before
-the processor sleeps.
+Because the processor was powered down, we still need to re-initialise the
+peripherals. Just be careful about how you do it. You don't want to be
+restarting your sensor every time you wake up.
+
+The catch is that the re-entry code to needs to be in RAM.
 Typically, pico code is run directly off of flash memory, so we need to do some
 work and load it into RAM first.
 The effect is that (at least some of) the RAM needs to be kept powered on during
-sleep to keep the re-entry code and corresponding stack around for wakeup.
+sleep to keep the re-entry code, CPU registers and stack around for wakeup.
 
 This requires some effort, and while it isn't a lot of work, you have to be
 careful about it.
 Unfortunately, I haven't found any documentation online that says you need to
 go through all of this to use the sparkly new power-saver features of the RP2350
-in a way that's useful for at least a large number of applications.
+to their fullest extent.
 
 Hopefully this explanation can help people understand *why* all of this work is
 needed and how to get it set up.
@@ -116,7 +111,7 @@ hardware and make the programmer do it instead.
 I feel like that's a fair trade-off really.
 A couple hundred bytes of code in exchange for a cheaper microcontroller.
 
-Will this change in the future? Who knows, maybe the third series of RP
+Will this change in the future? Who knows, maybe a third series of RP
 microcontrollers will have automatic sleep so we don't need to do all of this,
 but that's a long way away, so I won't hold by breath.
 
@@ -133,7 +128,7 @@ and more.
 This effectively powers off the whole microcontroller, sans the RAM, XIP cache
 and always-on (AON) domain.
 Inside this AON domain is the powman peripheral, containing the
-low-power oscillator (LPOSC), RTC timer and power control.
+low-power oscillator (LPOSC), AON timer and power control.
 Its this always-on logic that allows the microcontroller to wake itself up.
 You can configure up to four wake-up sources from either GPIO inputs or the AON
 timer.
@@ -144,41 +139,38 @@ execution from the bootloader, and passes control to `boot_stage2`.
 
 `boot_stage2` does lots of things[^4], too many to discuss here, but
 one important thing is initialising the C runtime, called `crt0`.
-This is common on even desktop PCs and it sets up the processor and memory to
-be in a state that can run C code.
+This is common even on desktop PCs and it configures the environment to be able
+to run C code.
 It involves running constructors, zeroing the BSS section of RAM
-and copying initial global variable values to this area, among other things.
+and initialising global variables, among other things.
 
 This is really helpful and all, but the problem comes when we already have RAM
 set up in a way we want, with nice data that we have carefully arranged and kept
 alive while we powered down the core.
 When `boot_stage2` is run on a reset, and is not instructed to do otherwise, it
-re-initialises the C runtime and overwrites all the RAM we care about.
+re-initialises the C runtime and overwrites all the RAM we care about (and
+ironically, none of the RAM we don't care about).
 
 To avoid this during powman resets, `boot_stage2` checks the four `BOOT` registers
 in the powman peripheral[^5] and jumps to that code instead of carrying on with
 the typical C runtime initialisation and jump to `main()`[^1].
 
-The datasheet states that this code needs to be stored in RAM as opposed to
-typical flash.
-I don't particularly know why this limitation exists, but I don't imagine it's
-there for no reason.
+As mentioned, this code needs to be stored in RAM since the QSPI peripheral
+that talks to the flash with all our code on it also got reset during the 
+power-down and needs to be reconfigured.
 
 The powman `BOOT` registers store both a reset vector and a stack pointer, so
 you can run the code with the same stack frame as when going to sleep.
-This means that, if you're careful with the stack, the reset vector function can
-return normally and pop off the return address which the last function put there
-and move back to where the program was before it went to sleep.
-It also retains the invariants of the ARM calling convention as a handy
-side-effect.
-It's a clever way of retaining program state while fully powering down the core.
+This means that, if you're careful with the stack, the wake-up code can
+restore the return address and all the registers which the sleep function saved
+and resume execution like nothing happened.
+Make sure that you save _all_ registers, so that the ARM calling convention
+isn't inadvertently broken.
 
-This, of course, means that if you want to retain your location in code, you
-also need to keep the RAM powered up, reducing possible power savings.
-But if you were worried about returning to where you left off, you probably have
-some sort of program state that you wanted to retain anyway and were unlikely
-to want to turn off the RAM in the first place, so it's not really an issue in
-reality.
+All of this requires keeping the RAM powered up, reducing possible power savings.
+However, if you were worried about returning to where you left off, you
+probably already had some sort of program state that you wanted to retain, so
+were unlikely to be in a position to turn off the RAM in the first place.
 
 While we want to avoid the standard initialisation sequence to keep our RAM
 intact, we still need to run *some* initialisation functions like properly
@@ -191,27 +183,19 @@ boot into our reset vector in RAM.
 This means that the reset vector also needs to park core1 so that we don't
 double-initialise things which usually ends up with either hangs or putting
 at least one core into an unknown state.
-
-## What's next?
-
-This code doesn't actually do exactly what I've written above... sorry, I lied.
-It doesn't jump back to where we left off, that requires some very precise
-stack bookkeeping which I haven't the experience to get right in a robust way.
-So for now, it assumes that you're running a superloop within a function and it
-just calls that instead.
-Though I do believe it is possible to carefully adjust the stack to jump back
-to the exact location where you left off.
+I haven't tested this with multi-core code, but how hard could that be?
+(Probably very hard)
 
 ## Credits and Resources
 
 Credits to peterharperuk for publishing a nice [powman example](https://github.com/peterharperuk/pico-examples/commit/7dccd00d15ded4ddf961f44fdcd1f11a9d8c8be1)
 which helped me start investigating "properly" the powman.
 
-[^1]: RP2350 datasheet, section 5.2:
-[^2]: RP2350 datasheet, section 6.3:
-[^5]: RP2350 datasheet, section 6.4:
+[^1]: RP2350 datasheet, section 5.2: <https://pip-assets.raspberrypi.com/categories/1214-rp2350/documents/RP-008373-DS-2-rp2350-datasheet.pdf?disposition=inline>
+[^2]: RP2350 datasheet, section 6.3: <https://pip-assets.raspberrypi.com/categories/1214-rp2350/documents/RP-008373-DS-2-rp2350-datasheet.pdf?disposition=inline>
+[^5]: RP2350 datasheet, section 6.4: <https://pip-assets.raspberrypi.com/categories/1214-rp2350/documents/RP-008373-DS-2-rp2350-datasheet.pdf?disposition=inline>
 [^3]: Kevin Boone's explanation of running code in RAM: <https://kevinboone.me/pico_run_ram.html>
-[^4]: `boot_stage2` in Pico-SDK GitHub: <>
+[^4]: `boot_stage2` in Pico-SDK GitHub: <https://github.com/raspberrypi/pico-sdk/blob/master/src/rp2040/boot_stage2/boot2_w25q080.S>
 [^7]: pico SDK `runtime_init()` <https://www.raspberrypi.com/documentation/pico-sdk/runtime.html#group_pico_runtime_1gad27ee86dcd85855022a424f61b839d04>
 
 ## License

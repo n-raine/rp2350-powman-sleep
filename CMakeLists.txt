@@ -11,6 +11,7 @@ pico_sdk_init()
 
 add_executable(powman_states
     powman_states.c
+    powman_states.S
 )
 
 # pull in common dependencies
